@@ -3,8 +3,10 @@
 namespace App\Models;
 
 use App\Traits\BelongsToInstitution;
+
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class LearningContent extends Model
 {
@@ -16,7 +18,9 @@ class LearningContent extends Model
         'subject_offering_id',
         'course_offering_id',
         'content_type',
+        'content_kind',
         'title',
+        'content',
         'description',
         'status',
         'workflow_status',
@@ -58,6 +62,11 @@ class LearningContent extends Model
     public function courseOffering(): BelongsTo
     {
         return $this->belongsTo(CourseOffering::class);
+    }
+
+    public function media(): HasMany
+    {
+        return $this->hasMany(LearningContentMedia::class);
     }
 
     public function isPublished(): bool

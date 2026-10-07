@@ -221,6 +221,10 @@ Route::middleware(['auth', 'permission:results.enter'])
         Route::get('/{offering}/import/preview', [LecturerResultController::class, 'importPreview'])->name('import.preview');
         Route::post('/{offering}/import/apply', [LecturerResultController::class, 'importApply'])->name('import.apply');
         Route::post('/{offering}/import/discard', [LecturerResultController::class, 'importDiscard'])->name('import.discard');
+
+
+        Route::get('/{offering}/scheme', [LecturerResultController::class, 'scheme'])->name('scheme');
+        Route::post('/{offering}/scheme', [LecturerResultController::class, 'schemeUpdate'])->name('scheme.update');
     });
 
 
@@ -277,6 +281,9 @@ Route::middleware(['auth', 'permission:results.approve'])
     ->group(function () {
         Route::get('/', [ClassTeacherController::class, 'index'])->name('index');
         Route::post('/{submission}/verify', [ClassTeacherController::class, 'verify'])->name('verify');
+
+        Route::get('/{offering}/scheme', [SubjectTeacherResultController::class, 'scheme'])->name('scheme');
+        Route::post('/{offering}/scheme', [SubjectTeacherResultController::class, 'schemeUpdate'])->name('scheme.update');
     });
 
 

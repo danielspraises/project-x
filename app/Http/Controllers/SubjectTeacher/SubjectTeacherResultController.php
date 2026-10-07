@@ -8,7 +8,9 @@ use App\Models\ResultSubmission;
 use App\Models\Student;
 use App\Models\StudentResult;
 use App\Models\SubjectOffering;
+use App\Models\AssessmentComponent;
 use App\Models\Term;
+use App\Services\Results\AssessmentSchemeService;
 use App\Services\Results\ResultEntryContext;
 use App\Services\Results\ResultEntryService;
 use App\Services\Results\ResultSubmissionService;
@@ -24,6 +26,7 @@ class SubjectTeacherResultController extends Controller
         private readonly ResultEntryContext $context,
         private readonly ResultEntryService $resultEntryService,
         private readonly ResultSubmissionService $submissionService,
+        private readonly AssessmentSchemeService $schemeService,
     ) {
     }
 
@@ -52,6 +55,7 @@ class SubjectTeacherResultController extends Controller
         $selectedOffering = null;
         $stats = null;
         $submission = null;
+        $scheme = null;
 
         if ($selectedSession && $selectedTerm) {
             $offerings = $this->context->basicFor($user, $selectedSession, $selectedTerm);
@@ -88,6 +92,8 @@ class SubjectTeacherResultController extends Controller
                         ->with('verifications')
                         ->latest()
                         ->first();
+
+                    $scheme = $this->schemeService->getOrCreateForOffering($selectedOffering, $user);
                 }
             }
         }
@@ -100,8 +106,67 @@ class SubjectTeacherResultController extends Controller
             'offerings',
             'selectedOffering',
             'stats',
-            'submission'
+            'submission',
+            'scheme'
         ));
+    }
+
+    /**
+     * Assessment scheme editor — same shape as the Lecturer one, but for a
+     * subject offering. The exam share is fixed by institution settings.
+     */
+    public function scheme(SubjectOffering $offering): View
+    {
+        $this->authorizeOffering($offering);
+
+        $offering->loadMissing('subject');
+        $scheme = $this->schemeService->getOrCreateForOffering($offering, Auth::user())->load('components');
+
+        return view('subject-teacher.results.scheme', compact('offering', 'scheme'));
+    }
+
+    public function schemeUpdate(Request $request, SubjectOffering $offering)
+    {
+        $this->authorizeOffering($offering);
+
+        $scheme = $this->schemeService->getOrCreateForOffering($offering, Auth::user());
+
+        $validated = $request->validate([
+            'components' => ['required', 'array', 'min:1'],
+            'components.*.type' => ['required', 'in:ca,quiz,assignment,attendance'],
+            'components.*.name' => ['required', 'string', 'max:100'],
+            'components.*.max_score' => ['required', 'integer', 'min:1', 'max:100'],
+        ]);
+
+        $components = collect($validated['components'])
+            ->values()
+            ->map(fn ($c, $i) => [
+                'type' => $c['type'],
+                'name' => $c['name'],
+                'max_score' => (int) $c['max_score'],
+                'order' => $i,
+            ])
+            ->push([
+                'type' => AssessmentComponent::TYPE_EXAM,
+                'name' => 'Exam',
+                'max_score' => $scheme->exam_max,
+                'order' => 999,
+            ])
+            ->all();
+
+        try {
+            $this->schemeService->replaceComponents($scheme, $components);
+        } catch (ValidationException $e) {
+            return back()->withErrors($e->errors())->withInput();
+        }
+
+        return redirect()
+            ->route('subject-teacher.results.index', [
+                'subject_offering_id' => $offering->id,
+                'academic_session_id' => $offering->academic_session_id,
+                'term_id' => $offering->term_id,
+            ])
+            ->with('success', 'Assessment scheme updated.');
     }
 
     /**

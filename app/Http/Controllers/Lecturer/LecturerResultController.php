@@ -8,7 +8,9 @@ use App\Models\CourseOffering;
 use App\Models\CourseRegistration;
 use App\Models\ResultSubmission;
 use App\Models\StudentResult;
+use App\Models\AssessmentComponent;
 use App\Models\Term;
+use App\Services\Results\AssessmentSchemeService;
 use App\Services\Results\ResultEntryContext;
 use App\Services\Results\ResultEntryService;
 use App\Services\Results\ResultSubmissionService;
@@ -23,6 +25,7 @@ class LecturerResultController extends Controller
         private readonly ResultEntryContext $context,
         private readonly ResultEntryService $resultEntryService,
         private readonly ResultSubmissionService $submissionService,
+        private readonly AssessmentSchemeService $schemeService,
     ) {
     }
 
@@ -52,6 +55,7 @@ class LecturerResultController extends Controller
         $selectedOffering = null;
         $stats = null;
         $submission = null;
+        $scheme = null;
 
         if ($selectedSession && $selectedTerm) {
             $offerings = $this->context->tertiaryOfferingsFor($user, $selectedSession, $selectedTerm);
@@ -84,6 +88,10 @@ class LecturerResultController extends Controller
                         ->with('verifications')
                         ->latest()
                         ->first();
+
+                    // Guarantees a scheme exists by the time entry happens —
+                    // lazily created here rather than needing a backfill.
+                    $scheme = $this->schemeService->getOrCreateForOffering($selectedOffering, $user);
                 }
             }
         }
@@ -96,8 +104,69 @@ class LecturerResultController extends Controller
             'offerings',
             'selectedOffering',
             'stats',
-            'submission'
+            'submission',
+            'scheme'
         ));
+    }
+
+    /**
+     * Assessment scheme editor: how many CAs (and quizzes/assignments/
+     * attendance, if used) make up the CA share, and how much each is worth.
+     * The exam share is fixed by the institution's settings and isn't
+     * editable here.
+     */
+    public function scheme(CourseOffering $offering): View
+    {
+        $this->authorizeOffering($offering);
+
+        $offering->loadMissing('course');
+        $scheme = $this->schemeService->getOrCreateForOffering($offering, Auth::user())->load('components');
+
+        return view('lecturer.results.scheme', compact('offering', 'scheme'));
+    }
+
+    public function schemeUpdate(Request $request, CourseOffering $offering)
+    {
+        $this->authorizeOffering($offering);
+
+        $scheme = $this->schemeService->getOrCreateForOffering($offering, Auth::user());
+
+        $validated = $request->validate([
+            'components' => ['required', 'array', 'min:1'],
+            'components.*.type' => ['required', 'in:ca,quiz,assignment,attendance'],
+            'components.*.name' => ['required', 'string', 'max:100'],
+            'components.*.max_score' => ['required', 'integer', 'min:1', 'max:100'],
+        ]);
+
+        $components = collect($validated['components'])
+            ->values()
+            ->map(fn ($c, $i) => [
+                'type' => $c['type'],
+                'name' => $c['name'],
+                'max_score' => (int) $c['max_score'],
+                'order' => $i,
+            ])
+            ->push([
+                'type' => AssessmentComponent::TYPE_EXAM,
+                'name' => 'Exam',
+                'max_score' => $scheme->exam_max,
+                'order' => 999,
+            ])
+            ->all();
+
+        try {
+            $this->schemeService->replaceComponents($scheme, $components);
+        } catch (ValidationException $e) {
+            return back()->withErrors($e->errors())->withInput();
+        }
+
+        return redirect()
+            ->route('lecturer.results.index', [
+                'course_offering_id' => $offering->id,
+                'academic_session_id' => $offering->term->academic_session_id,
+                'term_id' => $offering->term_id,
+            ])
+            ->with('success', 'Assessment scheme updated.');
     }
 
     /**

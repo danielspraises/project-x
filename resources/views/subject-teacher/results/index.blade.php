@@ -59,6 +59,24 @@
                     </div>
                 </div>
 
+                @if($scheme)
+                    <div class="mt-4 rounded-xl border border-white/10 bg-white/[0.04] p-4">
+                        <div class="flex items-center justify-between gap-3">
+                            <div class="text-xs uppercase tracking-[.18em] text-slate-500">Assessment scheme</div>
+                            @if($scheme->isLocked())
+                                <span class="rounded-full bg-slate-500/10 border border-slate-500/20 px-2 py-0.5 text-[10px] font-bold uppercase text-slate-400">Locked</span>
+                            @endif
+                        </div>
+                        <p class="mt-1 text-sm text-slate-300">
+                            {{ $scheme->components->where('type', '!=', 'exam')->map(fn($c) => $c->name.' ('.$c->max_score.')')->implode(' + ') }}
+                            = {{ $scheme->ca_max }} CA &nbsp;·&nbsp; Exam {{ $scheme->exam_max }}
+                        </p>
+                        <a href="{{ url('/subject-teacher/results/'.$selectedOffering->id.'/scheme') }}" class="mt-2 inline-block text-xs font-bold text-cyan-300 hover:text-cyan-200">
+                            {{ $scheme->isLocked() ? 'View scheme' : 'Edit scheme' }} →
+                        </a>
+                    </div>
+                @endif
+
                 @if($submission)
                     <div class="mt-4 rounded-xl border border-white/10 bg-white/[0.04] p-4">
                         <div class="text-xs uppercase tracking-[.18em] text-slate-500">Submission status</div>

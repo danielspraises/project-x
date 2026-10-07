@@ -4,11 +4,21 @@ namespace App\Http\Controllers;
 
 use App\Models\CourseOffering;
 use App\Models\LearningContent;
+use App\Models\LearningContentMedia;
 use App\Models\SubjectOffering;
-use App\Services\Learning\LearningContentGovernanceService;
+
+
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\Storage;
 use Illuminate\Validation\Rule;
+
+
+use App\Services\Learning\LearningContentGovernanceService;
+use App\Services\Learning\LearningContentKindService;
+
+
+
 
 class LearningContentController extends Controller
 {
@@ -60,7 +70,7 @@ class LearningContentController extends Controller
                 $search !== '',
                 fn ($query) => $query->where(function ($query) use ($search) {
                     $query->where('title', 'like', "%{$search}%")
-                        ->orWhere('description', 'like', "%{$search}%");
+                        ->orWhere('content', 'like', "%{$search}%");
                 })
             )
             ->latest()
@@ -86,6 +96,16 @@ class LearningContentController extends Controller
             404
         );
 
+        $educationLevel = $user->institution?->education_level;
+
+        if ($educationLevel === 'tertiary') {
+            abort_unless($type === 'lecture', 403);
+        } elseif (in_array($educationLevel, ['primary', 'secondary'], true)) {
+            abort_unless($type === 'lesson', 403);
+        } else {
+            abort(403);
+        }
+
         $feature = $type === 'lesson' ? 'lessons' : 'lectures';
         $permission = "{$feature}.create";
 
@@ -94,6 +114,10 @@ class LearningContentController extends Controller
 
         return view('learning.create', [
             'type' => $type,
+            'contentKinds' => LearningContentKindService::options(
+                $user->institution,
+                $type
+            ),
             'subjectOfferings' => $this->subjectOfferingsFor($user),
             'courseOfferings' => $this->courseOfferingsFor($user),
         ]);
@@ -108,8 +132,37 @@ class LearningContentController extends Controller
                 'required',
                 Rule::in(['lesson', 'lecture']),
             ],
+            'content_kind' => [
+                'required',
+                'string',
+                'max:40',
+            ],
             'title' => ['required', 'string', 'max:255'],
-            'description' => ['nullable', 'string'],
+            'content' => ['required', 'string'],
+            'audio' => [
+                'nullable',
+                'file',
+                'mimetypes:audio/mpeg,audio/wav,audio/x-wav,audio/ogg,audio/webm',
+                'max:10240',
+            ],
+            'video' => [
+                'nullable',
+                'file',
+                'mimetypes:video/mp4,video/webm,video/ogg',
+                'max:20480',
+            ],
+            'audio_url' => [
+                'nullable',
+                'url',
+                'max:2048',
+                'prohibited_with:audio',
+            ],
+            'video_url' => [
+                'nullable',
+                'url',
+                'max:2048',
+                'prohibited_with:video',
+            ],
             'subject_offering_id' => [
                 'nullable',
                 'integer',
@@ -136,11 +189,17 @@ class LearningContentController extends Controller
             403
         );
 
-        $subjectOffering = $validated['subject_offering_id']
+        LearningContentKindService::validate(
+            $user->institution,
+            $validated['content_type'],
+            $validated['content_kind']
+        );
+
+        $subjectOffering = ! empty($validated['subject_offering_id'])
             ? SubjectOffering::findOrFail($validated['subject_offering_id'])
             : null;
 
-        $courseOffering = $validated['course_offering_id']
+        $courseOffering = ! empty($validated['course_offering_id'])
             ? CourseOffering::findOrFail($validated['course_offering_id'])
             : null;
 
@@ -155,11 +214,58 @@ class LearningContentController extends Controller
             'subject_offering_id' => $subjectOffering?->id,
             'course_offering_id' => $courseOffering?->id,
             'content_type' => $validated['content_type'],
+            'content_kind' => $validated['content_kind'],
             'title' => $validated['title'],
-            'description' => $validated['description'] ?? null,
+            'content' => $validated['content'],
             'status' => 'draft',
             'workflow_status' => 'draft',
         ]);
+
+        if ($request->hasFile('audio')) {
+        $path = $request->file('audio')->store(
+            "learning-content/institution-{$user->institution_id}/content-{$content->id}/audio",
+            'public'
+        );
+
+        $content->media()->create([
+            'media_type' => 'audio',
+            'source_type' => 'upload',
+            'title' => $content->title,
+            'path' => $path,
+            'mime_type' => $request->file('audio')->getMimeType(),
+            'size' => $request->file('audio')->getSize(),
+        ]);
+    } elseif (! empty($validated['audio_url'])) {
+        $content->media()->create([
+            'media_type' => 'audio',
+            'source_type' => 'external',
+            'title' => $content->title,
+            'external_url' => $validated['audio_url'],
+        ]);
+    }
+
+    if ($request->hasFile('video')) {
+        $path = $request->file('video')->store(
+            "learning-content/institution-{$user->institution_id}/content-{$content->id}/video",
+            'public'
+        );
+
+        $content->media()->create([
+            'media_type' => 'video',
+            'source_type' => 'upload',
+            'title' => $content->title,
+            'path' => $path,
+            'mime_type' => $request->file('video')->getMimeType(),
+            'size' => $request->file('video')->getSize(),
+        ]);
+    } elseif (! empty($validated['video_url'])) {
+        $content->media()->create([
+            'media_type' => 'video',
+            'source_type' => 'external',
+            'title' => $content->title,
+            'external_url' => $validated['video_url'],
+        ]);
+    }
 
         $this->governance->record(
             content: $content,
@@ -180,7 +286,6 @@ class LearningContentController extends Controller
                 ucfirst($feature) . ' created successfully.'
             );
     }
-
     public function edit(LearningContent $learningContent)
     {
         $user = Auth::user();
@@ -201,9 +306,14 @@ class LearningContentController extends Controller
 
         return view('learning.edit', [
             'content' => $learningContent,
+            'contentKinds' => LearningContentKindService::options(
+                $user->institution,
+                $learningContent->content_type
+            ),
             'subjectOfferings' => $this->subjectOfferingsFor($user),
             'courseOfferings' => $this->courseOfferingsFor($user),
         ]);
+
     }
 
     public function update(
@@ -228,7 +338,7 @@ class LearningContentController extends Controller
 
         $validated = $request->validate([
             'title' => ['required', 'string', 'max:255'],
-            'description' => ['nullable', 'string'],
+            'content' => ['required', 'string'],
         ]);
 
         $learningContent->update($validated);
