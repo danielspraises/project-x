@@ -38,18 +38,30 @@
                 <input type="hidden" name="academic_session_id" value="{{ $offering->academic_session_id }}">
                 <input type="hidden" name="term_id" value="{{ $offering->term_id }}">
 
-                <div>
-                    <label class="block text-xs text-slate-400 mb-1">CA Score</label>
-                    <input type="number" step="0.01" min="0" max="100" name="ca_score"
-                           value="{{ old('ca_score', $existing?->ca_score) }}"
-                           class="w-full rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-sm">
-                </div>
-                <div>
-                    <label class="block text-xs text-slate-400 mb-1">Exam Score</label>
-                    <input type="number" step="0.01" min="0" max="100" name="exam_score"
-                           value="{{ old('exam_score', $existing?->exam_score) }}"
-                           class="w-full rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-sm">
-                </div>
+                @foreach ($scheme->components as $component)
+                    @php
+                        $cs = $componentScores->get($component->id);
+                        $isAbsent = (bool) old('components.'.$component->id.'.is_absent', $cs?->is_absent ?? false);
+                        $scoreValue = old('components.'.$component->id.'.score', $cs?->score);
+                    @endphp
+                    <div x-data="{ absent: {{ $isAbsent ? 'true' : 'false' }} }">
+                        <div class="mb-1 flex items-center justify-between">
+                            <label class="block text-xs text-slate-400">
+                                {{ $component->name }}
+                                <span class="text-slate-600">(out of {{ $component->max_score }})</span>
+                            </label>
+                            <label class="inline-flex items-center gap-1.5 text-[11px] text-slate-500">
+                                <input type="checkbox" name="components[{{ $component->id }}][is_absent]" value="1" x-model="absent"
+                                       class="rounded border-white/20 bg-white/5">
+                                Absent
+                            </label>
+                        </div>
+                        <input type="number" step="0.01" min="0" max="{{ $component->max_score }}"
+                               name="components[{{ $component->id }}][score]" value="{{ $scoreValue }}"
+                               :disabled="absent" :class="absent ? 'opacity-40' : ''"
+                               class="w-full rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-sm">
+                    </div>
+                @endforeach
 
                 <div class="flex flex-wrap justify-end gap-3 pt-2">
                     <button type="submit" name="go_to" value="list"

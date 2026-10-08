@@ -9,8 +9,10 @@ use App\Models\CourseRegistration;
 use App\Models\ResultSubmission;
 use App\Models\StudentResult;
 use App\Models\AssessmentComponent;
+use App\Models\AssessmentScore;
 use App\Models\Term;
 use App\Services\Results\AssessmentSchemeService;
+use App\Services\Results\AssessmentScoreService;
 use App\Services\Results\ResultEntryContext;
 use App\Services\Results\ResultEntryService;
 use App\Services\Results\ResultSubmissionService;
@@ -26,6 +28,7 @@ class LecturerResultController extends Controller
         private readonly ResultEntryService $resultEntryService,
         private readonly ResultSubmissionService $submissionService,
         private readonly AssessmentSchemeService $schemeService,
+        private readonly AssessmentScoreService $scoreService,
     ) {
     }
 
@@ -218,24 +221,22 @@ class LecturerResultController extends Controller
 
         $registration->loadMissing('student');
 
+        $scheme = $this->schemeService->getOrCreateForOffering($offering, Auth::user())->load('components');
+
         $existing = StudentResult::where('institution_id', $offering->institution_id)
             ->where('course_registration_id', $registration->id)
             ->first();
 
-        $neighbours = $offering->registrations()
-            ->with('student')
-            ->get()
-            ->filter(fn (CourseRegistration $r) => $r->student !== null)
-            ->sortBy([
-                fn ($r) => $r->student->last_name,
-                fn ($r) => $r->student->first_name,
-            ])
-            ->values();
+        $componentScores = $existing
+            ? AssessmentScore::where('student_result_id', $existing->id)->get()->keyBy('assessment_component_id')
+            : collect();
+
+        $neighbours = $this->sortedRegistrations($offering);
 
         $currentIndex = $neighbours->search(fn ($r) => $r->id === $registration->id);
         $next = $currentIndex !== false ? $neighbours->get($currentIndex + 1) : null;
 
-        return view('lecturer.results.students.show', compact('offering', 'registration', 'existing', 'next'));
+        return view('lecturer.results.students.show', compact('offering', 'registration', 'existing', 'next', 'scheme', 'componentScores'));
     }
 
     public function studentUpdate(Request $request, CourseOffering $offering, CourseRegistration $registration)
@@ -244,50 +245,35 @@ class LecturerResultController extends Controller
         $this->authorizeRegistration($offering, $registration);
 
         $user = Auth::user();
+        $scheme = $this->schemeService->getOrCreateForOffering($offering, $user)->load('components');
 
-        $validated = $request->validate([
+        $validated = $request->validate(array_merge([
             'academic_session_id' => ['required', 'integer'],
             'term_id' => ['required', 'integer'],
-            'ca_score' => ['nullable', 'numeric'],
-            'exam_score' => ['nullable', 'numeric'],
             'go_to' => ['nullable', 'in:next,list'],
-        ]);
-
-        $existing = StudentResult::where('institution_id', $user->institution_id)
-            ->where('course_registration_id', $registration->id)
-            ->first();
-
-        $payload = [
-            'student_id' => $registration->student_id,
-            'academic_session_id' => $validated['academic_session_id'],
-            'term_id' => $validated['term_id'],
-            'course_registration_id' => $registration->id,
-            'course_offering_id' => $offering->id,
-            'ca_score' => $validated['ca_score'] ?? null,
-            'exam_score' => $validated['exam_score'] ?? null,
-        ];
+            'components' => ['nullable', 'array'],
+        ], $this->componentRules($scheme, 'components')));
 
         try {
-            if ($existing) {
-                $this->resultEntryService->update($user, $existing, $payload);
-            } else {
-                $this->resultEntryService->create($user, $payload);
-            }
+            $this->scoreService->saveForStudent(
+                $user,
+                $scheme,
+                ['course_registration_id' => $registration->id],
+                [
+                    'student_id' => $registration->student_id,
+                    'academic_session_id' => $validated['academic_session_id'],
+                    'term_id' => $validated['term_id'],
+                    'course_registration_id' => $registration->id,
+                    'course_offering_id' => $offering->id,
+                ],
+                $this->extractComponentScores($scheme, $validated['components'] ?? [])
+            );
         } catch (ValidationException $e) {
             return back()->with('error', implode(' ', $e->validator->errors()->all()))->withInput();
         }
 
         if (($validated['go_to'] ?? null) === 'next') {
-            $neighbours = $offering->registrations()
-                ->with('student')
-                ->get()
-                ->filter(fn (CourseRegistration $r) => $r->student !== null)
-                ->sortBy([
-                    fn ($r) => $r->student->last_name,
-                    fn ($r) => $r->student->first_name,
-                ])
-                ->values();
-
+            $neighbours = $this->sortedRegistrations($offering);
             $currentIndex = $neighbours->search(fn ($r) => $r->id === $registration->id);
             $next = $currentIndex !== false ? $neighbours->get($currentIndex + 1) : null;
 
@@ -304,8 +290,7 @@ class LecturerResultController extends Controller
     }
 
     /**
-     * Bulk grid — the fast, whole-roster entry option, kept as its own page
-     * rather than sharing space with the summary.
+     * Bulk grid — one column per assessment component.
      */
     public function bulk(Request $request, CourseOffering $offering): View
     {
@@ -313,17 +298,12 @@ class LecturerResultController extends Controller
 
         $offering->loadMissing('course');
 
-        $students = $offering->registrations()
-            ->with('student')
-            ->get()
+        $scheme = $this->schemeService->getOrCreateForOffering($offering, Auth::user())->load('components');
+
+        $students = $this->sortedRegistrations($offering)
             ->map(fn ($registration) => (object) [
                 'registration_id' => $registration->id,
                 'student' => $registration->student,
-            ])
-            ->filter(fn ($row) => $row->student !== null)
-            ->sortBy([
-                fn ($r) => $r->student->last_name,
-                fn ($r) => $r->student->first_name,
             ])
             ->values();
 
@@ -332,6 +312,11 @@ class LecturerResultController extends Controller
             ->get()
             ->keyBy('course_registration_id');
 
+        $componentScoresByResult = AssessmentScore::whereIn('student_result_id', $existingResults->pluck('id'))
+            ->get()
+            ->groupBy('student_result_id')
+            ->map(fn ($rows) => $rows->keyBy('assessment_component_id'));
+
         $selectedSession = $request->integer('academic_session_id') ?: $offering->term?->academic_session_id;
         $selectedTerm = $request->integer('term_id') ?: $offering->term_id;
 
@@ -339,59 +324,64 @@ class LecturerResultController extends Controller
             'offering',
             'students',
             'existingResults',
+            'componentScoresByResult',
+            'scheme',
             'selectedSession',
             'selectedTerm'
         ));
     }
 
     /**
-     * Bulk save CA/exam scores for every student in one course offering.
-     * Loops through the existing single-result create/update path so
-     * versioning and audit logging stay exactly as they already work.
+     * Bulk save component scores for every student in one course offering.
+     * Rows with nothing entered are skipped; each saved row goes through
+     * AssessmentScoreService, which recomputes the student_results rollup
+     * via the existing versioned create/update path.
      */
     public function saveScores(Request $request, CourseOffering $offering)
     {
         $this->authorizeOffering($offering);
 
         $user = Auth::user();
+        $scheme = $this->schemeService->getOrCreateForOffering($offering, $user)->load('components');
 
-        $validated = $request->validate([
+        $validated = $request->validate(array_merge([
             'academic_session_id' => ['required', 'integer'],
             'term_id' => ['required', 'integer'],
             'scores' => ['required', 'array'],
             'scores.*.registration_id' => ['required', 'integer'],
             'scores.*.student_id' => ['required', 'integer'],
-            'scores.*.ca_score' => ['nullable', 'numeric'],
-            'scores.*.exam_score' => ['nullable', 'numeric'],
-        ]);
+        ], $this->componentRules($scheme, 'scores.*.components')));
 
+        $validRegistrationIds = $offering->registrations()->pluck('id')->all();
         $errors = [];
 
         foreach ($validated['scores'] as $row) {
-            if ($row['ca_score'] === null && $row['exam_score'] === null) {
-                continue; // skip untouched rows
+            if (! in_array((int) $row['registration_id'], $validRegistrationIds, true)) {
+                continue;
             }
 
-            $existing = StudentResult::where('institution_id', $user->institution_id)
-                ->where('course_registration_id', $row['registration_id'])
-                ->first();
+            $componentScores = $this->extractComponentScores($scheme, $row['components'] ?? []);
 
-            $payload = [
-                'student_id' => $row['student_id'],
-                'academic_session_id' => $validated['academic_session_id'],
-                'term_id' => $validated['term_id'],
-                'course_registration_id' => $row['registration_id'],
-                'course_offering_id' => $offering->id,
-                'ca_score' => $row['ca_score'],
-                'exam_score' => $row['exam_score'],
-            ];
+            $hasAny = collect($componentScores)->contains(fn ($c) => $c['score'] !== null || $c['is_absent']);
+
+            if (! $hasAny) {
+                continue; // untouched row
+            }
 
             try {
-                if ($existing) {
-                    $this->resultEntryService->update($user, $existing, $payload);
-                } else {
-                    $this->resultEntryService->create($user, $payload);
-                }
+                $this->scoreService->saveForStudent(
+                    $user,
+                    $scheme,
+                    ['course_registration_id' => $row['registration_id']],
+                    [
+                        'student_id' => $row['student_id'],
+                        'academic_session_id' => $validated['academic_session_id'],
+                        'term_id' => $validated['term_id'],
+                        'course_registration_id' => $row['registration_id'],
+                        'course_offering_id' => $offering->id,
+                    ],
+                    $componentScores
+                );
             } catch (ValidationException $e) {
                 $errors[] = "Student #{$row['student_id']}: ".implode(' ', $e->validator->errors()->all());
             }
@@ -408,6 +398,56 @@ class LecturerResultController extends Controller
                 'course_offering_id' => $offering->id,
             ])
             ->with('success', 'Scores saved.');
+    }
+
+    /**
+     * Per-component validation rules: each score must be numeric and
+     * between 0 and that component's own max.
+     */
+    private function componentRules($scheme, string $prefix): array
+    {
+        $rules = [];
+
+        foreach ($scheme->components as $component) {
+            $rules["{$prefix}.{$component->id}.score"] = ['nullable', 'numeric', 'min:0', 'max:'.$component->max_score];
+            $rules["{$prefix}.{$component->id}.is_absent"] = ['nullable', 'boolean'];
+        }
+
+        return $rules;
+    }
+
+    /**
+     * @return array<int, array{score: float|null, is_absent: bool}>
+     */
+    private function extractComponentScores($scheme, array $input): array
+    {
+        $out = [];
+
+        foreach ($scheme->components as $component) {
+            $row = $input[$component->id] ?? [];
+            $isAbsent = (bool) ($row['is_absent'] ?? false);
+            $score = $isAbsent ? null : ($row['score'] ?? null);
+
+            $out[$component->id] = [
+                'score' => ($score === '' || $score === null) ? null : (float) $score,
+                'is_absent' => $isAbsent,
+            ];
+        }
+
+        return $out;
+    }
+
+    private function sortedRegistrations(CourseOffering $offering)
+    {
+        return $offering->registrations()
+            ->with('student')
+            ->get()
+            ->filter(fn (CourseRegistration $r) => $r->student !== null)
+            ->sortBy([
+                fn ($r) => $r->student->last_name,
+                fn ($r) => $r->student->first_name,
+            ])
+            ->values();
     }
 
     public function submit(Request $request, CourseOffering $offering)

@@ -100,10 +100,11 @@
                        class="rounded-xl border border-white/15 bg-white/5 px-5 py-2.5 text-sm font-black text-slate-100 hover:bg-white/10">
                         Bulk Entry Grid
                     </a>
-                    <a href="{{ url('/lecturer/results/'.$selectedOffering->id.'/import?academic_session_id='.$selectedSession.'&term_id='.$selectedTerm) }}"
+                    {{-- CSV upload hidden until it supports per-component columns (Batch 4) --}}
+                    {{-- <a href="{{ url('/lecturer/results/'.$selectedOffering->id.'/import?academic_session_id='.$selectedSession.'&term_id='.$selectedTerm) }}"
                        class="rounded-xl border border-white/15 bg-white/5 px-5 py-2.5 text-sm font-black text-slate-100 hover:bg-white/10">
                         Bulk Upload (CSV)
-                    </a>
+                    </a> --}}
                 </div>
             </div>
 

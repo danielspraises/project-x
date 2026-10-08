@@ -9,8 +9,10 @@ use App\Models\Student;
 use App\Models\StudentResult;
 use App\Models\SubjectOffering;
 use App\Models\AssessmentComponent;
+use App\Models\AssessmentScore;
 use App\Models\Term;
 use App\Services\Results\AssessmentSchemeService;
+use App\Services\Results\AssessmentScoreService;
 use App\Services\Results\ResultEntryContext;
 use App\Services\Results\ResultEntryService;
 use App\Services\Results\ResultSubmissionService;
@@ -27,6 +29,7 @@ class SubjectTeacherResultController extends Controller
         private readonly ResultEntryService $resultEntryService,
         private readonly ResultSubmissionService $submissionService,
         private readonly AssessmentSchemeService $schemeService,
+        private readonly AssessmentScoreService $scoreService,
     ) {
     }
 
@@ -208,19 +211,23 @@ class SubjectTeacherResultController extends Controller
         $this->authorizeOffering($offering);
         $this->authorizeStudent($offering, $student);
 
+        $scheme = $this->schemeService->getOrCreateForOffering($offering, Auth::user())->load('components');
+
         $existing = StudentResult::where('institution_id', $offering->institution_id)
             ->where('subject_offering_id', $offering->id)
             ->where('student_id', $student->id)
             ->first();
 
-        $neighbours = $this->context->studentsForBasic(Auth::user(), $offering)
-            ->sortBy([fn ($s) => $s->last_name, fn ($s) => $s->first_name])
-            ->values();
+        $componentScores = $existing
+            ? AssessmentScore::where('student_result_id', $existing->id)->get()->keyBy('assessment_component_id')
+            : collect();
+
+        $neighbours = $this->sortedStudents($offering);
 
         $currentIndex = $neighbours->search(fn ($s) => $s->id === $student->id);
         $next = $currentIndex !== false ? $neighbours->get($currentIndex + 1) : null;
 
-        return view('subject-teacher.results.students.show', compact('offering', 'student', 'existing', 'next'));
+        return view('subject-teacher.results.students.show', compact('offering', 'student', 'existing', 'next', 'scheme', 'componentScores'));
     }
 
     public function studentUpdate(Request $request, SubjectOffering $offering, Student $student)
@@ -229,48 +236,38 @@ class SubjectTeacherResultController extends Controller
         $this->authorizeStudent($offering, $student);
 
         $user = Auth::user();
+        $scheme = $this->schemeService->getOrCreateForOffering($offering, $user)->load('components');
 
-        $validated = $request->validate([
+        $validated = $request->validate(array_merge([
             'academic_session_id' => ['required', 'integer'],
             'term_id' => ['required', 'integer'],
-            'ca_score' => ['nullable', 'numeric'],
-            'exam_score' => ['nullable', 'numeric'],
             'go_to' => ['nullable', 'in:next,list'],
-        ]);
-
-        $existing = StudentResult::where('institution_id', $user->institution_id)
-            ->where('subject_offering_id', $offering->id)
-            ->where('student_id', $student->id)
-            ->first();
-
-        $payload = [
-            'student_id' => $student->id,
-            'academic_session_id' => $validated['academic_session_id'],
-            'term_id' => $validated['term_id'],
-            'subject_offering_id' => $offering->id,
-            'class_id' => $offering->class_id,
-            // Each student has their own arm even on a class-wide (arm_id
-            // null) offering, so this comes from the student, not the offering.
-            'arm_id' => $student->arm_id,
-            'ca_score' => $validated['ca_score'] ?? null,
-            'exam_score' => $validated['exam_score'] ?? null,
-        ];
+            'components' => ['nullable', 'array'],
+        ], $this->componentRules($scheme, 'components')));
 
         try {
-            if ($existing) {
-                $this->resultEntryService->update($user, $existing, $payload);
-            } else {
-                $this->resultEntryService->create($user, $payload);
-            }
+            $this->scoreService->saveForStudent(
+                $user,
+                $scheme,
+                ['subject_offering_id' => $offering->id, 'student_id' => $student->id],
+                [
+                    'student_id' => $student->id,
+                    'academic_session_id' => $validated['academic_session_id'],
+                    'term_id' => $validated['term_id'],
+                    'subject_offering_id' => $offering->id,
+                    'class_id' => $offering->class_id,
+                    // Each student has their own arm even on a class-wide (arm_id
+                    // null) offering, so this comes from the student, not the offering.
+                    'arm_id' => $student->arm_id,
+                ],
+                $this->extractComponentScores($scheme, $validated['components'] ?? [])
+            );
         } catch (ValidationException $e) {
             return back()->with('error', implode(' ', $e->validator->errors()->all()))->withInput();
         }
 
         if (($validated['go_to'] ?? null) === 'next') {
-            $neighbours = $this->context->studentsForBasic($user, $offering)
-                ->sortBy([fn ($s) => $s->last_name, fn ($s) => $s->first_name])
-                ->values();
-
+            $neighbours = $this->sortedStudents($offering);
             $currentIndex = $neighbours->search(fn ($s) => $s->id === $student->id);
             $next = $currentIndex !== false ? $neighbours->get($currentIndex + 1) : null;
 
@@ -292,15 +289,20 @@ class SubjectTeacherResultController extends Controller
 
         $offering->loadMissing('subject', 'schoolClass', 'arm');
 
-        $students = $this->context->studentsForBasic(Auth::user(), $offering)
-            ->sortBy([fn ($s) => $s->last_name, fn ($s) => $s->first_name])
-            ->values();
+        $scheme = $this->schemeService->getOrCreateForOffering($offering, Auth::user())->load('components');
+
+        $students = $this->sortedStudents($offering);
 
         $existingResults = StudentResult::where('institution_id', $offering->institution_id)
             ->where('subject_offering_id', $offering->id)
             ->whereIn('student_id', $students->pluck('id'))
             ->get()
             ->keyBy('student_id');
+
+        $componentScoresByResult = AssessmentScore::whereIn('student_result_id', $existingResults->pluck('id'))
+            ->get()
+            ->groupBy('student_result_id')
+            ->map(fn ($rows) => $rows->keyBy('assessment_component_id'));
 
         $selectedSession = $request->integer('academic_session_id') ?: $offering->academic_session_id;
         $selectedTerm = $request->integer('term_id') ?: $offering->term_id;
@@ -309,6 +311,8 @@ class SubjectTeacherResultController extends Controller
             'offering',
             'students',
             'existingResults',
+            'componentScoresByResult',
+            'scheme',
             'selectedSession',
             'selectedTerm'
         ));
@@ -319,15 +323,16 @@ class SubjectTeacherResultController extends Controller
         $this->authorizeOffering($offering);
 
         $user = Auth::user();
+        $scheme = $this->schemeService->getOrCreateForOffering($offering, $user)->load('components');
 
-        $validated = $request->validate([
+        $validated = $request->validate(array_merge([
             'academic_session_id' => ['required', 'integer'],
             'term_id' => ['required', 'integer'],
             'scores' => ['required', 'array'],
             'scores.*.student_id' => ['required', 'integer'],
-            'scores.*.ca_score' => ['nullable', 'numeric'],
-            'scores.*.exam_score' => ['nullable', 'numeric'],
-        ]);
+        ], $this->componentRules($scheme, 'scores.*.components')));
+
+        $registeredStudentIds = $this->sortedStudents($offering)->pluck('id')->all();
 
         $studentArms = Student::whereIn('id', collect($validated['scores'])->pluck('student_id'))
             ->pluck('arm_id', 'id');
@@ -335,32 +340,33 @@ class SubjectTeacherResultController extends Controller
         $errors = [];
 
         foreach ($validated['scores'] as $row) {
-            if ($row['ca_score'] === null && $row['exam_score'] === null) {
+            if (! in_array((int) $row['student_id'], $registeredStudentIds, true)) {
                 continue;
             }
 
-            $existing = StudentResult::where('institution_id', $user->institution_id)
-                ->where('subject_offering_id', $offering->id)
-                ->where('student_id', $row['student_id'])
-                ->first();
+            $componentScores = $this->extractComponentScores($scheme, $row['components'] ?? []);
 
-            $payload = [
-                'student_id' => $row['student_id'],
-                'academic_session_id' => $validated['academic_session_id'],
-                'term_id' => $validated['term_id'],
-                'subject_offering_id' => $offering->id,
-                'class_id' => $offering->class_id,
-                'arm_id' => $studentArms->get($row['student_id']),
-                'ca_score' => $row['ca_score'],
-                'exam_score' => $row['exam_score'],
-            ];
+            $hasAny = collect($componentScores)->contains(fn ($c) => $c['score'] !== null || $c['is_absent']);
+
+            if (! $hasAny) {
+                continue; // untouched row
+            }
 
             try {
-                if ($existing) {
-                    $this->resultEntryService->update($user, $existing, $payload);
-                } else {
-                    $this->resultEntryService->create($user, $payload);
-                }
+                $this->scoreService->saveForStudent(
+                    $user,
+                    $scheme,
+                    ['subject_offering_id' => $offering->id, 'student_id' => $row['student_id']],
+                    [
+                        'student_id' => $row['student_id'],
+                        'academic_session_id' => $validated['academic_session_id'],
+                        'term_id' => $validated['term_id'],
+                        'subject_offering_id' => $offering->id,
+                        'class_id' => $offering->class_id,
+                        'arm_id' => $studentArms->get($row['student_id']),
+                    ],
+                    $componentScores
+                );
             } catch (ValidationException $e) {
                 $errors[] = "Student #{$row['student_id']}: ".implode(' ', $e->validator->errors()->all());
             }
@@ -377,6 +383,46 @@ class SubjectTeacherResultController extends Controller
                 'subject_offering_id' => $offering->id,
             ])
             ->with('success', 'Scores saved.');
+    }
+
+    private function componentRules($scheme, string $prefix): array
+    {
+        $rules = [];
+
+        foreach ($scheme->components as $component) {
+            $rules["{$prefix}.{$component->id}.score"] = ['nullable', 'numeric', 'min:0', 'max:'.$component->max_score];
+            $rules["{$prefix}.{$component->id}.is_absent"] = ['nullable', 'boolean'];
+        }
+
+        return $rules;
+    }
+
+    /**
+     * @return array<int, array{score: float|null, is_absent: bool}>
+     */
+    private function extractComponentScores($scheme, array $input): array
+    {
+        $out = [];
+
+        foreach ($scheme->components as $component) {
+            $row = $input[$component->id] ?? [];
+            $isAbsent = (bool) ($row['is_absent'] ?? false);
+            $score = $isAbsent ? null : ($row['score'] ?? null);
+
+            $out[$component->id] = [
+                'score' => ($score === '' || $score === null) ? null : (float) $score,
+                'is_absent' => $isAbsent,
+            ];
+        }
+
+        return $out;
+    }
+
+    private function sortedStudents(SubjectOffering $offering)
+    {
+        return $this->context->studentsForBasic(Auth::user(), $offering)
+            ->sortBy([fn ($s) => $s->last_name, fn ($s) => $s->first_name])
+            ->values();
     }
 
     public function submit(Request $request, SubjectOffering $offering)
