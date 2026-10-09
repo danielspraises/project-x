@@ -5,6 +5,7 @@ namespace App\Services\Results;
 use App\Models\AssessmentComponent;
 use App\Models\AssessmentScheme;
 use App\Models\CourseOffering;
+use App\Models\Institution;
 use App\Models\ResultAuditLog;
 use App\Models\SubjectOffering;
 use App\Models\User;
@@ -30,7 +31,9 @@ class AssessmentSchemeService
             return $scheme;
         }
 
-        $settings = $offering->institution->assessmentSettings();
+        // CourseOffering/SubjectOffering define no institution() relation, so
+        // load the institution by id rather than through a relation.
+        $settings = Institution::findOrFail($offering->institution_id)->assessmentSettings();
 
         return DB::transaction(function () use ($offering, $column, $settings, $createdBy) {
             $scheme = AssessmentScheme::create([
