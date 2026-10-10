@@ -28,7 +28,7 @@ class AssessmentSchemeService
         $scheme = AssessmentScheme::where($column, $offering->id)->first();
 
         if ($scheme) {
-            return $scheme;
+            return $this->syncWithInstitution($scheme);
         }
 
         // CourseOffering/SubjectOffering define no institution() relation, so
@@ -45,26 +45,118 @@ class AssessmentSchemeService
                 'created_by' => $createdBy?->id,
             ]);
 
-            AssessmentComponent::create([
-                'institution_id' => $offering->institution_id,
-                'assessment_scheme_id' => $scheme->id,
-                'type' => AssessmentComponent::TYPE_CA,
-                'name' => 'CA',
-                'max_score' => $scheme->ca_max,
-                'order' => 0,
-            ]);
+            if ($scheme->ca_max > 0) {
+                AssessmentComponent::create([
+                    'institution_id' => $offering->institution_id,
+                    'assessment_scheme_id' => $scheme->id,
+                    'type' => AssessmentComponent::TYPE_CA,
+                    'name' => 'CA',
+                    'max_score' => $scheme->ca_max,
+                    'order' => 0,
+                ]);
+            }
 
-            AssessmentComponent::create([
-                'institution_id' => $offering->institution_id,
-                'assessment_scheme_id' => $scheme->id,
-                'type' => AssessmentComponent::TYPE_EXAM,
-                'name' => 'Exam',
-                'max_score' => $scheme->exam_max,
-                'order' => 1,
-            ]);
+            if ($scheme->exam_max > 0) {
+                AssessmentComponent::create([
+                    'institution_id' => $offering->institution_id,
+                    'assessment_scheme_id' => $scheme->id,
+                    'type' => AssessmentComponent::TYPE_EXAM,
+                    'name' => 'Exam',
+                    'max_score' => $scheme->exam_max,
+                    'order' => 1,
+                ]);
+            }
 
             return $scheme->load('components');
         });
+    }
+
+    /**
+     * Keep an unscored scheme in step with the institution's current
+     * CA/Exam weights (set by the ICT Admin). A locked scheme already has
+     * scores under it, so it keeps its own split — changing weights after
+     * marks exist would silently change those marks.
+     *
+     * A single CA component simply resizes. If the teacher split the CA into
+     * several, their split is kept but no longer adds up, so isConsistent()
+     * turns false and the teacher is asked to re-split it.
+     */
+    public function syncWithInstitution(AssessmentScheme $scheme): AssessmentScheme
+    {
+        if ($scheme->isLocked()) {
+            return $scheme;
+        }
+
+        $settings = Institution::findOrFail($scheme->institution_id)->assessmentSettings();
+        $caMax = (int) $settings['ca_weight'];
+        $examMax = (int) $settings['exam_weight'];
+
+        if ((int) $scheme->ca_max === $caMax && (int) $scheme->exam_max === $examMax) {
+            return $scheme;
+        }
+
+        return DB::transaction(function () use ($scheme, $caMax, $examMax) {
+            $scheme->update(['ca_max' => $caMax, 'exam_max' => $examMax]);
+
+            $components = $scheme->components()->get();
+            $exam = $components->firstWhere('type', AssessmentComponent::TYPE_EXAM);
+            $nonExam = $components->where('type', '!=', AssessmentComponent::TYPE_EXAM)->values();
+
+            if ($examMax === 0) {
+                $exam?->delete();
+            } elseif ($exam) {
+                $exam->update(['max_score' => $examMax]);
+            } else {
+                AssessmentComponent::create([
+                    'institution_id' => $scheme->institution_id,
+                    'assessment_scheme_id' => $scheme->id,
+                    'type' => AssessmentComponent::TYPE_EXAM,
+                    'name' => 'Exam',
+                    'max_score' => $examMax,
+                    'order' => 999,
+                ]);
+            }
+
+            if ($caMax === 0) {
+                $nonExam->each->delete();
+            } elseif ($nonExam->isEmpty()) {
+                AssessmentComponent::create([
+                    'institution_id' => $scheme->institution_id,
+                    'assessment_scheme_id' => $scheme->id,
+                    'type' => AssessmentComponent::TYPE_CA,
+                    'name' => 'CA',
+                    'max_score' => $caMax,
+                    'order' => 0,
+                ]);
+            } elseif ($nonExam->count() === 1) {
+                $nonExam->first()->update(['max_score' => $caMax]);
+            }
+
+            return $scheme->fresh('components');
+        });
+    }
+
+    /**
+     * True when the components add up to exactly the scheme's CA and exam
+     * shares. Entry is blocked while this is false, so a total can never be
+     * computed from a split that doesn't match the institution's weights.
+     */
+    public function isConsistent(AssessmentScheme $scheme): bool
+    {
+        $scheme->loadMissing('components');
+
+        $exam = $scheme->components->where('type', AssessmentComponent::TYPE_EXAM);
+        $nonExam = $scheme->components->where('type', '!=', AssessmentComponent::TYPE_EXAM);
+
+        $examOk = (int) $scheme->exam_max > 0
+            ? $exam->count() === 1 && (int) $exam->first()->max_score === (int) $scheme->exam_max
+            : $exam->isEmpty();
+
+        $caOk = (int) $scheme->ca_max > 0
+            ? $nonExam->isNotEmpty() && (int) $nonExam->sum('max_score') === (int) $scheme->ca_max
+            : $nonExam->isEmpty();
+
+        return $examOk && $caOk;
     }
 
     /**
@@ -87,29 +179,35 @@ class AssessmentSchemeService
         $examComponents = array_values(array_filter($components, fn ($c) => $c['type'] === AssessmentComponent::TYPE_EXAM));
         $nonExamComponents = array_values(array_filter($components, fn ($c) => $c['type'] !== AssessmentComponent::TYPE_EXAM));
 
-        if (count($examComponents) !== 1) {
+        if ((int) $scheme->exam_max > 0) {
+            if (count($examComponents) !== 1 || (int) $examComponents[0]['max_score'] !== (int) $scheme->exam_max) {
+                throw ValidationException::withMessages([
+                    'components' => "A scheme needs exactly one exam component worth {$scheme->exam_max} marks.",
+                ]);
+            }
+        } elseif (count($examComponents) > 0) {
             throw ValidationException::withMessages([
-                'components' => 'A scheme needs exactly one exam component.',
-            ]);
-        }
-
-        if ((int) $examComponents[0]['max_score'] !== (int) $scheme->exam_max) {
-            throw ValidationException::withMessages([
-                'components' => "The exam component must be worth exactly {$scheme->exam_max} marks.",
-            ]);
-        }
-
-        if (empty($nonExamComponents)) {
-            throw ValidationException::withMessages([
-                'components' => 'At least one CA, quiz, assignment, or attendance component is required.',
+                'components' => 'This institution awards no marks to the exam, so there is no exam component.',
             ]);
         }
 
         $nonExamTotal = array_sum(array_map(fn ($c) => (int) $c['max_score'], $nonExamComponents));
 
-        if ($nonExamTotal !== (int) $scheme->ca_max) {
+        if ((int) $scheme->ca_max > 0) {
+            if (empty($nonExamComponents)) {
+                throw ValidationException::withMessages([
+                    'components' => 'At least one CA, quiz, assignment, or attendance component is required.',
+                ]);
+            }
+
+            if ($nonExamTotal !== (int) $scheme->ca_max) {
+                throw ValidationException::withMessages([
+                    'components' => "The non-exam components must add up to exactly {$scheme->ca_max} marks (currently {$nonExamTotal}).",
+                ]);
+            }
+        } elseif (! empty($nonExamComponents)) {
             throw ValidationException::withMessages([
-                'components' => "The non-exam components must add up to exactly {$scheme->ca_max} marks (currently {$nonExamTotal}).",
+                'components' => 'This institution awards no marks to continuous assessment, so there are no CA components.',
             ]);
         }
 

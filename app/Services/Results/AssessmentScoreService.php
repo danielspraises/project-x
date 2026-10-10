@@ -7,6 +7,7 @@ use App\Models\AssessmentScore;
 use App\Models\StudentResult;
 use App\Models\User;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Validation\ValidationException;
 
 class AssessmentScoreService
 {
@@ -40,6 +41,14 @@ class AssessmentScoreService
         array $context,
         array $componentScores
     ): StudentResult {
+        $scheme->loadMissing('components');
+
+        if (! $this->schemeService->isConsistent($scheme)) {
+            throw ValidationException::withMessages([
+                'scheme' => "This course's assessment scheme no longer adds up to the institution's CA/Exam weights. Update the scheme before entering scores.",
+            ]);
+        }
+
         return DB::transaction(function () use ($user, $scheme, $lookup, $context, $componentScores) {
             $query = StudentResult::where('institution_id', $user->institution_id);
 
@@ -119,8 +128,10 @@ class AssessmentScoreService
         $nonExam = $scheme->components->where('type', '!=', 'exam')->values();
         $examComponent = $scheme->components->firstWhere('type', 'exam');
 
-        $ca = $this->sumIfComplete($nonExam, $scores);
-        $exam = $examComponent ? $this->sumIfComplete(collect([$examComponent]), $scores) : null;
+        // A side the institution gives 0% has no components and counts as 0,
+        // so the total can still complete (e.g. an exam-only institution).
+        $ca = $nonExam->isEmpty() ? 0.0 : $this->sumIfComplete($nonExam, $scores);
+        $exam = $examComponent ? $this->sumIfComplete(collect([$examComponent]), $scores) : 0.0;
 
         return [$ca, $exam];
     }

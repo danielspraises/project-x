@@ -102,7 +102,7 @@
                             <input id="exam_weight" name="exam_weight" type="number" min="0" max="100"
                                    value="{{ old('exam_weight', $assessmentSettings['exam_weight']) }}"
                                    class="cx-input mt-2 w-full" required>
-                            <p class="ui-muted mt-2 text-xs">CA and Examination weights must total exactly 100%.</p>
+                            <p class="ui-muted mt-2 text-xs">CA and Examination weights must total exactly 100%. A new weighting applies to every course and subject that has no scores yet; ones that already have scores keep the split they were scored under.</p>
                         </div>
                     </div>
 

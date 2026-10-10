@@ -25,7 +25,11 @@
             </div>
         @endif
 
-        @if ($scheme->isLocked())
+        @if ((int) $scheme->ca_max === 0)
+            <div class="cx-panel rounded-[1.5rem] border border-white/10 bg-slate-900/75 p-6 text-sm text-slate-300">
+                This institution awards all {{ $scheme->exam_max }} marks to the exam, so there is no continuous assessment to split.
+            </div>
+        @elseif ($scheme->isLocked())
             <div class="cx-panel rounded-[1.5rem] border border-white/10 bg-slate-900/75 p-6">
                 <div class="inline-flex items-center gap-2 rounded-full bg-slate-500/10 border border-slate-500/20 px-3 py-1 text-xs font-bold uppercase text-slate-400 mb-4">
                     Locked — scores already exist

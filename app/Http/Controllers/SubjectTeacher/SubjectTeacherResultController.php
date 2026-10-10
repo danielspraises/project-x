@@ -59,6 +59,7 @@ class SubjectTeacherResultController extends Controller
         $stats = null;
         $submission = null;
         $scheme = null;
+        $schemeNeedsAttention = false;
 
         if ($selectedSession && $selectedTerm) {
             $offerings = $this->context->basicFor($user, $selectedSession, $selectedTerm);
@@ -97,6 +98,7 @@ class SubjectTeacherResultController extends Controller
                         ->first();
 
                     $scheme = $this->schemeService->getOrCreateForOffering($selectedOffering, $user);
+                    $schemeNeedsAttention = ! $this->schemeService->isConsistent($scheme);
                 }
             }
         }
@@ -110,7 +112,8 @@ class SubjectTeacherResultController extends Controller
             'selectedOffering',
             'stats',
             'submission',
-            'scheme'
+            'scheme',
+            'schemeNeedsAttention'
         ));
     }
 
@@ -134,6 +137,10 @@ class SubjectTeacherResultController extends Controller
 
         $scheme = $this->schemeService->getOrCreateForOffering($offering, Auth::user());
 
+        if ((int) $scheme->ca_max === 0) {
+            return back()->with('error', 'This institution awards no marks to continuous assessment, so there is no CA split to configure.');
+        }
+
         $validated = $request->validate([
             'components' => ['required', 'array', 'min:1'],
             'components.*.type' => ['required', 'in:ca,quiz,assignment,attendance'],
@@ -149,12 +156,12 @@ class SubjectTeacherResultController extends Controller
                 'max_score' => (int) $c['max_score'],
                 'order' => $i,
             ])
-            ->push([
+            ->when($scheme->exam_max > 0, fn ($c) => $c->push([
                 'type' => AssessmentComponent::TYPE_EXAM,
                 'name' => 'Exam',
                 'max_score' => $scheme->exam_max,
                 'order' => 999,
-            ])
+            ]))
             ->all();
 
         try {
@@ -206,12 +213,18 @@ class SubjectTeacherResultController extends Controller
         return view('subject-teacher.results.students.index', compact('offering', 'students'));
     }
 
-    public function studentShow(SubjectOffering $offering, Student $student): View
+    public function studentShow(SubjectOffering $offering, Student $student): View|\Illuminate\Http\RedirectResponse
     {
         $this->authorizeOffering($offering);
         $this->authorizeStudent($offering, $student);
 
         $scheme = $this->schemeService->getOrCreateForOffering($offering, Auth::user())->load('components');
+
+        if (! $this->schemeService->isConsistent($scheme)) {
+            return redirect()
+                ->route('subject-teacher.results.scheme', $offering)
+                ->with('error', "The institution's CA/Exam weights changed, so this assessment scheme needs updating before scores can be entered.");
+        }
 
         $existing = StudentResult::where('institution_id', $offering->institution_id)
             ->where('subject_offering_id', $offering->id)
@@ -283,13 +296,19 @@ class SubjectTeacherResultController extends Controller
             ->with('success', 'Score saved.');
     }
 
-    public function bulk(Request $request, SubjectOffering $offering): View
+    public function bulk(Request $request, SubjectOffering $offering): View|\Illuminate\Http\RedirectResponse
     {
         $this->authorizeOffering($offering);
 
         $offering->loadMissing('subject', 'schoolClass', 'arm');
 
         $scheme = $this->schemeService->getOrCreateForOffering($offering, Auth::user())->load('components');
+
+        if (! $this->schemeService->isConsistent($scheme)) {
+            return redirect()
+                ->route('subject-teacher.results.scheme', $offering)
+                ->with('error', "The institution's CA/Exam weights changed, so this assessment scheme needs updating before scores can be entered.");
+        }
 
         $students = $this->sortedStudents($offering);
 

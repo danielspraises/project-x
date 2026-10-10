@@ -71,6 +71,11 @@
                             {{ $scheme->components->where('type', '!=', 'exam')->map(fn($c) => $c->name.' ('.$c->max_score.')')->implode(' + ') }}
                             = {{ $scheme->ca_max }} CA &nbsp;·&nbsp; Exam {{ $scheme->exam_max }}
                         </p>
+                        @if(!empty($schemeNeedsAttention))
+                            <p class="mt-2 rounded-lg border border-amber-400/20 bg-amber-400/5 px-3 py-2 text-xs text-amber-300">
+                                The institution's CA/Exam weights changed and this split no longer adds up. Update the scheme before entering scores.
+                            </p>
+                        @endif
                         <a href="{{ url('/subject-teacher/results/'.$selectedOffering->id.'/scheme') }}" class="mt-2 inline-block text-xs font-bold text-cyan-300 hover:text-cyan-200">
                             {{ $scheme->isLocked() ? 'View scheme' : 'Edit scheme' }} →
                         </a>

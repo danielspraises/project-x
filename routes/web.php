@@ -250,7 +250,7 @@ Route::middleware('auth')->group(function () {
 
 
 
-// Subject/class teacher routes
+// Subject teacher routes
 use App\Http\Controllers\SubjectTeacher\SubjectTeacherResultController;
 use App\Http\Controllers\ClassTeacher\ClassTeacherController;
 
@@ -273,8 +273,12 @@ Route::middleware(['auth', 'permission:results.enter'])
         Route::post('/{offering}/import/apply', [SubjectTeacherResultController::class, 'importApply'])->name('import.apply');
         Route::post('/{offering}/import/discard', [SubjectTeacherResultController::class, 'importDiscard'])->name('import.discard');
 
+
+        Route::get('/{offering}/scheme', [SubjectTeacherResultController::class, 'scheme'])->name('scheme');
+        Route::post('/{offering}/scheme', [SubjectTeacherResultController::class, 'schemeUpdate'])->name('scheme.update');
     });
 
+// Subject teacher routes
 Route::middleware(['auth', 'permission:results.approve'])
     ->prefix('class-teacher/results')
     ->name('class-teacher.results.')
@@ -282,8 +286,7 @@ Route::middleware(['auth', 'permission:results.approve'])
         Route::get('/', [ClassTeacherController::class, 'index'])->name('index');
         Route::post('/{submission}/verify', [ClassTeacherController::class, 'verify'])->name('verify');
 
-        Route::get('/{offering}/scheme', [SubjectTeacherResultController::class, 'scheme'])->name('scheme');
-        Route::post('/{offering}/scheme', [SubjectTeacherResultController::class, 'schemeUpdate'])->name('scheme.update');
+
     });
 
 

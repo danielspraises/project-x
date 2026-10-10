@@ -59,6 +59,7 @@ class LecturerResultController extends Controller
         $stats = null;
         $submission = null;
         $scheme = null;
+        $schemeNeedsAttention = false;
 
         if ($selectedSession && $selectedTerm) {
             $offerings = $this->context->tertiaryOfferingsFor($user, $selectedSession, $selectedTerm);
@@ -95,6 +96,7 @@ class LecturerResultController extends Controller
                     // Guarantees a scheme exists by the time entry happens —
                     // lazily created here rather than needing a backfill.
                     $scheme = $this->schemeService->getOrCreateForOffering($selectedOffering, $user);
+                    $schemeNeedsAttention = ! $this->schemeService->isConsistent($scheme);
                 }
             }
         }
@@ -108,7 +110,8 @@ class LecturerResultController extends Controller
             'selectedOffering',
             'stats',
             'submission',
-            'scheme'
+            'scheme',
+            'schemeNeedsAttention'
         ));
     }
 
@@ -134,6 +137,10 @@ class LecturerResultController extends Controller
 
         $scheme = $this->schemeService->getOrCreateForOffering($offering, Auth::user());
 
+        if ((int) $scheme->ca_max === 0) {
+            return back()->with('error', 'This institution awards no marks to continuous assessment, so there is no CA split to configure.');
+        }
+
         $validated = $request->validate([
             'components' => ['required', 'array', 'min:1'],
             'components.*.type' => ['required', 'in:ca,quiz,assignment,attendance'],
@@ -149,12 +156,12 @@ class LecturerResultController extends Controller
                 'max_score' => (int) $c['max_score'],
                 'order' => $i,
             ])
-            ->push([
+            ->when($scheme->exam_max > 0, fn ($c) => $c->push([
                 'type' => AssessmentComponent::TYPE_EXAM,
                 'name' => 'Exam',
                 'max_score' => $scheme->exam_max,
                 'order' => 999,
-            ])
+            ]))
             ->all();
 
         try {
@@ -214,7 +221,7 @@ class LecturerResultController extends Controller
     /**
      * Single-student score entry.
      */
-    public function studentShow(CourseOffering $offering, CourseRegistration $registration): View
+    public function studentShow(CourseOffering $offering, CourseRegistration $registration): View|\Illuminate\Http\RedirectResponse
     {
         $this->authorizeOffering($offering);
         $this->authorizeRegistration($offering, $registration);
@@ -222,6 +229,12 @@ class LecturerResultController extends Controller
         $registration->loadMissing('student');
 
         $scheme = $this->schemeService->getOrCreateForOffering($offering, Auth::user())->load('components');
+
+        if (! $this->schemeService->isConsistent($scheme)) {
+            return redirect()
+                ->route('lecturer.results.scheme', $offering)
+                ->with('error', "The institution's CA/Exam weights changed, so this assessment scheme needs updating before scores can be entered.");
+        }
 
         $existing = StudentResult::where('institution_id', $offering->institution_id)
             ->where('course_registration_id', $registration->id)
@@ -292,13 +305,19 @@ class LecturerResultController extends Controller
     /**
      * Bulk grid — one column per assessment component.
      */
-    public function bulk(Request $request, CourseOffering $offering): View
+    public function bulk(Request $request, CourseOffering $offering): View|\Illuminate\Http\RedirectResponse
     {
         $this->authorizeOffering($offering);
 
         $offering->loadMissing('course');
 
         $scheme = $this->schemeService->getOrCreateForOffering($offering, Auth::user())->load('components');
+
+        if (! $this->schemeService->isConsistent($scheme)) {
+            return redirect()
+                ->route('lecturer.results.scheme', $offering)
+                ->with('error', "The institution's CA/Exam weights changed, so this assessment scheme needs updating before scores can be entered.");
+        }
 
         $students = $this->sortedRegistrations($offering)
             ->map(fn ($registration) => (object) [
