@@ -14,7 +14,7 @@
 
         <div class="cx-panel mb-6 overflow-hidden rounded-[2rem] border border-white/10 bg-white/[0.06] p-6 shadow-2xl backdrop-blur-2xl">
             <h1 class="text-2xl font-black tracking-tight">Bulk Upload — {{ $offering->subject->name }}</h1>
-            <p class="mt-2 text-sm text-slate-400">Upload CA scores, exam scores, or both — whichever you have. A blank cell always means "leave as is." Students are matched by admission number.</p>
+            <p class="mt-2 text-sm text-slate-400">The template has one column for each part of the assessment scheme. Fill in whichever columns you have — CA only, exam only, or all of them. A <b class="text-slate-200">blank cell leaves that score as it is</b>, so uploading CA scores will never erase exam scores already entered. Type <b class="text-slate-200">A</b> for a student who was absent (counts as 0). Students are matched by admission number. Don't rename or reorder the column headings — if the scheme changes, download a fresh template.</p>
         </div>
 
         @if (session('error'))

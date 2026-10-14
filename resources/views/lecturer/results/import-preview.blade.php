@@ -5,23 +5,25 @@
         <div class="absolute right-0 top-1/3 h-96 w-96 rounded-full bg-violet-500/10 blur-3xl"></div>
     </div>
 
-    <div class="relative mx-auto max-w-[900px] px-4 py-6 sm:px-6 lg:px-8">
+    <div class="relative mx-auto max-w-[1100px] px-4 py-6 sm:px-6 lg:px-8">
 
         <div class="cx-panel mb-6 overflow-hidden rounded-[2rem] border border-white/10 bg-white/[0.06] p-6 shadow-2xl backdrop-blur-2xl">
             <h1 class="text-2xl font-black tracking-tight">Review before saving</h1>
-            <p class="mt-2 text-sm text-slate-400">{{ $offering->course->code }} — nothing has been saved yet. Check the rows below, then apply or discard.</p>
+            <p class="mt-2 text-sm text-slate-400">{{ $offering->course->code }} — nothing has been saved yet. Check the rows below, then apply or discard. Columns you left blank are not changed.</p>
         </div>
 
         @php
             $good = $rows->filter(fn ($r) => empty($r['error']));
             $bad = $rows->filter(fn ($r) => !empty($r['error']));
+            $components = $scheme->components;
         @endphp
 
-        <div class="mb-4 flex gap-4 text-sm">
+        <div class="mb-4 flex flex-wrap gap-4 text-sm">
             <span class="rounded-full bg-emerald-400/10 border border-emerald-400/20 px-3 py-1 font-bold text-emerald-300">{{ $good->count() }} ready to apply</span>
             @if ($bad->count())
                 <span class="rounded-full bg-rose-400/10 border border-rose-400/20 px-3 py-1 font-bold text-rose-300">{{ $bad->count() }} will be skipped</span>
             @endif
+            <span class="text-xs text-slate-500 self-center">A = absent (counts as 0)</span>
         </div>
 
         <div class="cx-panel overflow-hidden rounded-[1.75rem] border border-white/10 bg-slate-900/75 shadow-2xl mb-6">
@@ -31,14 +33,15 @@
                         <tr>
                             <th class="px-5 py-3">Row</th>
                             <th class="px-5 py-3">Student</th>
-                            <th class="px-5 py-3">CA (current → new)</th>
-                            <th class="px-5 py-3">Exam (current → new)</th>
+                            @foreach ($components as $component)
+                                <th class="px-3 py-3">{{ $component->name }} <span class="text-slate-600 normal-case">/ {{ $component->max_score }}</span></th>
+                            @endforeach
                             <th class="px-5 py-3">Status</th>
                         </tr>
                     </thead>
                     <tbody class="divide-y divide-white/5">
                         @foreach ($rows as $row)
-                            <tr class="{{ !empty($row['error']) ? 'opacity-60' : '' }}">
+                            <tr class="{{ !empty($row['error']) ? 'opacity-70' : '' }}">
                                 <td class="px-5 py-3 text-slate-500">{{ $row['row'] }}</td>
                                 <td class="px-5 py-3">
                                     {{ $row['student_name'] ?? '—' }}
@@ -47,27 +50,28 @@
                                     @endif
                                 </td>
                                 @if (empty($row['error']))
-                                    <td class="px-5 py-3">
-                                        {{ $row['current_ca'] ?? '—' }}
-                                        @if ((string) $row['current_ca'] !== (string) $row['new_ca'])
-                                            <span class="text-cyan-300">→ {{ $row['new_ca'] ?? '—' }}</span>
-                                        @endif
-                                    </td>
-                                    <td class="px-5 py-3">
-                                        {{ $row['current_exam'] ?? '—' }}
-                                        @if ((string) $row['current_exam'] !== (string) $row['new_exam'])
-                                            <span class="text-cyan-300">→ {{ $row['new_exam'] ?? '—' }}</span>
-                                        @endif
-                                    </td>
+                                    @foreach ($components as $component)
+                                        @php $cell = $row['cells'][$component->id] ?? null; @endphp
+                                        <td class="px-3 py-3">
+                                            @if ($cell)
+                                                @if ((string) $cell['current'] === (string) $cell['new'])
+                                                    <span class="text-slate-400">{{ $cell['new'] }}</span>
+                                                @else
+                                                    <span class="text-slate-500">{{ $cell['current'] !== '' ? $cell['current'] : '—' }}</span>
+                                                    <span class="text-cyan-300">→ {{ $cell['new'] }}</span>
+                                                @endif
+                                            @else
+                                                <span class="text-slate-700">·</span>
+                                            @endif
+                                        </td>
+                                    @endforeach
                                     <td class="px-5 py-3">
                                         <span class="rounded-full bg-emerald-400/10 border border-emerald-400/20 px-2 py-0.5 text-xs font-bold text-emerald-300">Ready</span>
                                     </td>
                                 @else
-                                    <td class="px-5 py-3 text-slate-600" colspan="2">—</td>
+                                    <td class="px-3 py-3 text-slate-600" colspan="{{ max($components->count(), 1) }}">—</td>
                                     <td class="px-5 py-3">
-                                        <span class="rounded-full bg-rose-400/10 border border-rose-400/20 px-2 py-0.5 text-xs font-bold text-rose-300" title="{{ $row['error'] }}">
-                                            {{ $row['error'] }}
-                                        </span>
+                                        <span class="rounded-full bg-rose-400/10 border border-rose-400/20 px-2 py-0.5 text-xs font-bold text-rose-300">{{ $row['error'] }}</span>
                                     </td>
                                 @endif
                             </tr>

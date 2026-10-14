@@ -11,6 +11,7 @@ use App\Models\SubjectOffering;
 use App\Models\AssessmentComponent;
 use App\Models\AssessmentScore;
 use App\Models\Term;
+use App\Services\Results\AssessmentCsvHelper;
 use App\Services\Results\AssessmentSchemeService;
 use App\Services\Results\AssessmentScoreService;
 use App\Services\Results\ResultEntryContext;
@@ -30,6 +31,7 @@ class SubjectTeacherResultController extends Controller
         private readonly ResultSubmissionService $submissionService,
         private readonly AssessmentSchemeService $schemeService,
         private readonly AssessmentScoreService $scoreService,
+        private readonly AssessmentCsvHelper $csv,
     ) {
     }
 
@@ -490,21 +492,27 @@ class SubjectTeacherResultController extends Controller
     /**
      * CSV import form.
      */
-    public function importForm(Request $request, SubjectOffering $offering): View
+    public function importForm(Request $request, SubjectOffering $offering): View|\Illuminate\Http\RedirectResponse
     {
         $this->authorizeOffering($offering);
 
         $offering->loadMissing('subject', 'schoolClass', 'arm');
 
+        $scheme = $this->schemeService->getOrCreateForOffering($offering, Auth::user())->load('components');
+
+        if (! $this->schemeService->isConsistent($scheme)) {
+            return $this->schemeNeedsUpdateRedirect($offering);
+        }
+
         $selectedSession = $request->integer('academic_session_id') ?: $offering->academic_session_id;
         $selectedTerm = $request->integer('term_id') ?: $offering->term_id;
 
-        return view('subject-teacher.results.import', compact('offering', 'selectedSession', 'selectedTerm'));
+        return view('subject-teacher.results.import', compact('offering', 'selectedSession', 'selectedTerm', 'scheme'));
     }
 
     /**
-     * Downloadable CSV template, pre-filled with each student's admission
-     * number and current scores.
+     * Downloadable CSV template: one column per assessment component,
+     * pre-filled with the saved score ("A" for absent).
      */
     public function importTemplate(SubjectOffering $offering)
     {
@@ -512,31 +520,44 @@ class SubjectTeacherResultController extends Controller
 
         $offering->loadMissing('subject');
 
-        $students = $this->context->studentsForBasic(Auth::user(), $offering)
-            ->sortBy([fn ($s) => $s->last_name, fn ($s) => $s->first_name])
-            ->values();
+        $scheme = $this->schemeService->getOrCreateForOffering($offering, Auth::user())->load('components');
 
-        $existingResults = StudentResult::where('institution_id', $offering->institution_id)
+        if (! $this->schemeService->isConsistent($scheme)) {
+            return $this->schemeNeedsUpdateRedirect($offering);
+        }
+
+        $students = $this->sortedStudents($offering);
+
+        $results = StudentResult::where('institution_id', $offering->institution_id)
             ->where('subject_offering_id', $offering->id)
             ->whereIn('student_id', $students->pluck('id'))
             ->get()
             ->keyBy('student_id');
 
+        $scoresByResult = AssessmentScore::whereIn('student_result_id', $results->pluck('id'))
+            ->get()
+            ->groupBy('student_result_id')
+            ->map(fn ($rows) => $rows->keyBy('assessment_component_id'));
+
+        $components = $scheme->components;
         $filename = 'scores-'.($offering->subject->name ?? $offering->id).'-template.csv';
 
-        return response()->streamDownload(function () use ($students, $existingResults) {
+        return response()->streamDownload(function () use ($students, $results, $scoresByResult, $components) {
             $out = fopen('php://output', 'w');
-            fputcsv($out, ['admission_number', 'student_name', 'ca_score', 'exam_score']);
+
+            fputcsv($out, array_merge(
+                ['admission_number', 'student_name'],
+                $components->map(fn ($c) => $this->csv->headerFor($c))->all()
+            ));
 
             foreach ($students as $student) {
-                $existing = $existingResults->get($student->id);
+                $result = $results->get($student->id);
+                $rowScores = $result ? ($scoresByResult->get($result->id) ?? collect()) : collect();
 
-                fputcsv($out, [
-                    $student->admission_number,
-                    $student->last_name.', '.$student->first_name,
-                    $existing?->ca_score,
-                    $existing?->exam_score,
-                ]);
+                fputcsv($out, array_merge(
+                    [$student->admission_number, $student->last_name.', '.$student->first_name],
+                    $components->map(fn ($c) => $this->csv->describe($rowScores->get($c->id)))->all()
+                ));
             }
 
             fclose($out);
@@ -544,16 +565,22 @@ class SubjectTeacherResultController extends Controller
     }
 
     /**
-     * Parse and validate an uploaded CSV, but write nothing yet — staged in
-     * the session until confirmed on the preview page (importApply) or
-     * discarded (importDiscard). Same "blank cell = leave unchanged" rule
-     * as the Lecturer importer.
+     * Parse and validate an uploaded CSV, writing nothing yet — staged in
+     * the session until confirmed (importApply) or discarded
+     * (importDiscard). Blank = leave as is, "A" = absent, and a score over
+     * its component's max rejects that row.
      */
     public function importUpload(Request $request, SubjectOffering $offering)
     {
         $this->authorizeOffering($offering);
 
         $user = Auth::user();
+
+        $scheme = $this->schemeService->getOrCreateForOffering($offering, $user)->load('components');
+
+        if (! $this->schemeService->isConsistent($scheme)) {
+            return $this->schemeNeedsUpdateRedirect($offering);
+        }
 
         $request->validate([
             'file' => ['required', 'file', 'mimes:csv,txt', 'max:2048'],
@@ -569,28 +596,42 @@ class SubjectTeacherResultController extends Controller
             return back()->with('error', 'The uploaded file is empty.');
         }
 
-        $header = array_map(fn ($h) => strtolower(trim((string) $h)), $header);
+        // Excel's "CSV UTF-8" prepends a byte-order mark to the first heading.
+        $header[0] = preg_replace('/^\xEF\xBB\xBF/', '', (string) $header[0]);
 
-        $columnIndex = [];
-        foreach (['admission_number', 'ca_score', 'exam_score'] as $column) {
-            $pos = array_search($column, $header, true);
-            $columnIndex[$column] = $pos === false ? null : $pos;
-        }
+        $keyIndex = array_search('admission_number', array_map(fn ($h) => strtolower(trim((string) $h)), $header), true);
 
-        if ($columnIndex['admission_number'] === null) {
+        if ($keyIndex === false) {
             fclose($handle);
-            return back()->with('error', 'The CSV is missing an "admission_number" column. Please use the downloaded template and don\'t rename its headers.');
+            return back()->with('error', 'The CSV is missing an "admission_number" column. Please use the downloaded template and don\'t rename its headings.');
         }
 
-        $studentsByAdmission = $this->context->studentsForBasic($user, $offering)
+        [$columnMap, $unknownHeadings] = $this->csv->mapComponentColumns($header, $scheme->components);
+
+        if ($unknownHeadings !== []) {
+            fclose($handle);
+            return back()->with('error', 'This file was made for an older version of the assessment scheme ("'.implode('", "', $unknownHeadings).'"). Download a fresh template and try again.');
+        }
+
+        if ($columnMap === []) {
+            fclose($handle);
+            return back()->with('error', 'No score columns found. Use the downloaded template and keep its column headings.');
+        }
+
+        $studentsByAdmission = $this->sortedStudents($offering)
             ->filter(fn ($s) => $s->admission_number !== null)
             ->keyBy(fn ($s) => strtoupper(trim($s->admission_number)));
 
-        $existingResults = StudentResult::where('institution_id', $user->institution_id)
+        $results = StudentResult::where('institution_id', $user->institution_id)
             ->where('subject_offering_id', $offering->id)
             ->whereIn('student_id', $studentsByAdmission->pluck('id'))
             ->get()
             ->keyBy('student_id');
+
+        $scoresByResult = AssessmentScore::whereIn('student_result_id', $results->pluck('id'))
+            ->get()
+            ->groupBy('student_result_id')
+            ->map(fn ($rows) => $rows->keyBy('assessment_component_id'));
 
         $stagedRows = [];
         $rowNum = 0;
@@ -599,10 +640,10 @@ class SubjectTeacherResultController extends Controller
             $rowNum++;
 
             if (count(array_filter($data, fn ($v) => trim((string) $v) !== '')) === 0) {
-                continue;
+                continue; // fully blank line
             }
 
-            $admission = strtoupper(trim((string) ($data[$columnIndex['admission_number']] ?? '')));
+            $admission = strtoupper(trim((string) ($data[$keyIndex] ?? '')));
 
             if ($admission === '') {
                 $stagedRows[] = ['row' => $rowNum, 'error' => 'Blank admission number.'];
@@ -616,37 +657,48 @@ class SubjectTeacherResultController extends Controller
                 continue;
             }
 
-            $caRaw = $columnIndex['ca_score'] !== null ? trim((string) ($data[$columnIndex['ca_score']] ?? '')) : '';
-            $examRaw = $columnIndex['exam_score'] !== null ? trim((string) ($data[$columnIndex['exam_score']] ?? '')) : '';
+            $name = $student->last_name.', '.$student->first_name;
+            $result = $results->get($student->id);
+            $rowScores = $result ? ($scoresByResult->get($result->id) ?? collect()) : collect();
 
-            if ($caRaw === '' && $examRaw === '') {
+            $cells = [];
+            $cellErrors = [];
+
+            foreach ($columnMap as $index => $component) {
+                $parsed = $this->csv->parseCell((string) ($data[$index] ?? ''), $component);
+
+                if ($parsed['error'] !== null) {
+                    $cellErrors[] = "{$component->name}: {$parsed['error']}";
+                    continue;
+                }
+
+                if ($parsed['blank']) {
+                    continue;
+                }
+
+                $cells[$component->id] = [
+                    'current' => $this->csv->describe($rowScores->get($component->id)),
+                    'new' => $parsed['absent'] ? 'A' : $this->csv->formatNumber($parsed['value']),
+                    'score' => $parsed['value'],
+                    'is_absent' => $parsed['absent'],
+                ];
+            }
+
+            if ($cellErrors !== []) {
+                $stagedRows[] = ['row' => $rowNum, 'admission_number' => $admission, 'student_name' => $name, 'error' => implode('; ', $cellErrors)];
                 continue;
             }
 
-            if ($caRaw !== '' && ! is_numeric($caRaw)) {
-                $stagedRows[] = ['row' => $rowNum, 'admission_number' => $admission, 'student_name' => $student->last_name.', '.$student->first_name, 'error' => "CA score \"{$caRaw}\" is not numeric."];
-                continue;
+            if ($cells === []) {
+                continue; // nothing on this row to stage
             }
-
-            if ($examRaw !== '' && ! is_numeric($examRaw)) {
-                $stagedRows[] = ['row' => $rowNum, 'admission_number' => $admission, 'student_name' => $student->last_name.', '.$student->first_name, 'error' => "Exam score \"{$examRaw}\" is not numeric."];
-                continue;
-            }
-
-            $existing = $existingResults->get($student->id);
-
-            $newCa = $caRaw !== '' ? (float) $caRaw : $existing?->ca_score;
-            $newExam = $examRaw !== '' ? (float) $examRaw : $existing?->exam_score;
 
             $stagedRows[] = [
                 'row' => $rowNum,
                 'student_id' => $student->id,
                 'admission_number' => $admission,
-                'student_name' => $student->last_name.', '.$student->first_name,
-                'current_ca' => $existing?->ca_score,
-                'current_exam' => $existing?->exam_score,
-                'new_ca' => $newCa,
-                'new_exam' => $newExam,
+                'student_name' => $name,
+                'cells' => $cells,
                 'error' => null,
             ];
         }
@@ -680,8 +732,11 @@ class SubjectTeacherResultController extends Controller
 
         $offering->loadMissing('subject');
 
+        $scheme = $this->schemeService->getOrCreateForOffering($offering, Auth::user())->load('components');
+
         return view('subject-teacher.results.import-preview', [
             'offering' => $offering,
+            'scheme' => $scheme,
             'rows' => collect($staged['rows']),
             'selectedSession' => $staged['academic_session_id'],
             'selectedTerm' => $staged['term_id'],
@@ -701,6 +756,14 @@ class SubjectTeacherResultController extends Controller
                 ->with('error', 'Nothing staged to apply — upload a file first.');
         }
 
+        $scheme = $this->schemeService->getOrCreateForOffering($offering, $user)->load('components');
+
+        if (! $this->schemeService->isConsistent($scheme)) {
+            return $this->schemeNeedsUpdateRedirect($offering);
+        }
+
+        $validComponentIds = $scheme->components->pluck('id')->map(fn ($id) => (int) $id)->all();
+
         $studentArms = Student::whereIn('id', collect($staged['rows'])->pluck('student_id')->filter())
             ->pluck('arm_id', 'id');
 
@@ -709,38 +772,54 @@ class SubjectTeacherResultController extends Controller
         $rowErrors = [];
 
         foreach ($staged['rows'] as $row) {
+            $label = $row['student_name'] ?? ($row['admission_number'] ?? '');
+            $prefix = "Row {$row['row']}".($label ? " ({$label})" : '');
+
             if (! empty($row['error'])) {
-                $label = $row['student_name'] ?? ($row['admission_number'] ?? '');
-                $rowErrors[] = "Row {$row['row']}".($label ? " ({$label})" : '').": {$row['error']}";
+                $rowErrors[] = "{$prefix}: {$row['error']}";
                 $skipped++;
                 continue;
             }
 
-            $existing = StudentResult::where('institution_id', $user->institution_id)
-                ->where('subject_offering_id', $offering->id)
-                ->where('student_id', $row['student_id'])
-                ->first();
+            $componentScores = [];
+            $stale = false;
 
-            $payload = [
-                'student_id' => $row['student_id'],
-                'academic_session_id' => $staged['academic_session_id'],
-                'term_id' => $staged['term_id'],
-                'subject_offering_id' => $offering->id,
-                'class_id' => $offering->class_id,
-                'arm_id' => $studentArms->get($row['student_id']),
-                'ca_score' => $row['new_ca'],
-                'exam_score' => $row['new_exam'],
-            ];
+            foreach ($row['cells'] as $componentId => $cell) {
+                if (! in_array((int) $componentId, $validComponentIds, true)) {
+                    $stale = true;
+                    break;
+                }
+
+                $componentScores[(int) $componentId] = [
+                    'score' => $cell['score'],
+                    'is_absent' => (bool) $cell['is_absent'],
+                ];
+            }
+
+            if ($stale) {
+                $rowErrors[] = "{$prefix}: the assessment scheme changed after this file was uploaded — upload it again.";
+                $skipped++;
+                continue;
+            }
 
             try {
-                if ($existing) {
-                    $this->resultEntryService->update($user, $existing, $payload);
-                } else {
-                    $this->resultEntryService->create($user, $payload);
-                }
+                $this->scoreService->saveForStudent(
+                    $user,
+                    $scheme,
+                    ['subject_offering_id' => $offering->id, 'student_id' => $row['student_id']],
+                    [
+                        'student_id' => $row['student_id'],
+                        'academic_session_id' => $staged['academic_session_id'],
+                        'term_id' => $staged['term_id'],
+                        'subject_offering_id' => $offering->id,
+                        'class_id' => $offering->class_id,
+                        'arm_id' => $studentArms->get($row['student_id']),
+                    ],
+                    $componentScores
+                );
                 $updated++;
             } catch (ValidationException $e) {
-                $rowErrors[] = "Row {$row['row']} ({$row['student_name']}): ".implode(' ', $e->validator->errors()->all());
+                $rowErrors[] = "{$prefix}: ".implode(' ', $e->validator->errors()->all());
                 $skipped++;
             }
         }
@@ -758,6 +837,13 @@ class SubjectTeacherResultController extends Controller
                 'skipped' => $skipped,
                 'errors' => $rowErrors,
             ]);
+    }
+
+    private function schemeNeedsUpdateRedirect(SubjectOffering $offering)
+    {
+        return redirect()
+            ->route('subject-teacher.results.scheme', $offering)
+            ->with('error', "The institution's CA/Exam weights changed, so this assessment scheme needs updating before scores can be imported.");
     }
 
     public function importDiscard(SubjectOffering $offering)
