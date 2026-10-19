@@ -176,6 +176,14 @@ class AssessmentSchemeService
             ]);
         }
 
+        $names = array_map(fn ($c) => strtolower(trim($c['name'])), $components);
+
+        if (count($names) !== count(array_unique($names))) {
+            throw ValidationException::withMessages([
+                'components' => 'Each component needs its own name — two of them are named the same.',
+            ]);
+        }
+
         $examComponents = array_values(array_filter($components, fn ($c) => $c['type'] === AssessmentComponent::TYPE_EXAM));
         $nonExamComponents = array_values(array_filter($components, fn ($c) => $c['type'] !== AssessmentComponent::TYPE_EXAM));
 

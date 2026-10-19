@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Models\ResultAuditLog;
 use App\Models\ResultSubmission;
 use App\Models\ResultVerification;
+use App\Services\Results\ResultReviewService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
@@ -15,6 +16,11 @@ use App\Notifications\ResultReturnedNotification;
 
 class HodController extends Controller
 {
+    public function __construct(
+        private readonly ResultReviewService $review,
+    ) {
+    }
+
     /**
      * List result submissions from the HOD's department that are awaiting verification.
      */
@@ -38,6 +44,39 @@ class HodController extends Controller
             ->get();
 
         return view('hod.results.index', compact('submissions'));
+    }
+
+    /**
+     * Read-only preview of one submission's scores, so the HOD can look at
+     * the actual marks before approving or returning it.
+     */
+    public function show(ResultSubmission $submission): View
+    {
+        $user = Auth::user();
+
+        if ($submission->institution_id !== $user->institution_id) {
+            abort(403, 'This submission does not belong to your institution.');
+        }
+
+        $submission->loadMissing('courseOffering.course', 'courseOffering.programme', 'submittedBy', 'verifications.reviewer');
+
+        $departmentId = $submission->courseOffering?->course?->department_id;
+
+        if (! $departmentId || $departmentId !== $user->department_id) {
+            abort(403, 'You can only review submissions from your own department.');
+        }
+
+        $offering = $submission->courseOffering;
+        $course = $offering?->course;
+
+        return view('results.review', array_merge($this->review->build($submission), [
+            'submission' => $submission,
+            'title' => $course ? $course->code.' — '.$course->title : 'Result set #'.$submission->id,
+            'subtitle' => trim(($offering?->programme?->name ?? '').($offering?->level ? ' · Level '.$offering->level : '')),
+            'verifyUrl' => route('hod.results.verify', $submission),
+            'backUrl' => route('hod.results.index'),
+            'reviewerLabel' => 'HOD',
+        ]));
     }
 
     /**

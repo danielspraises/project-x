@@ -288,7 +288,7 @@ class SubjectTeacherResultController extends Controller
 
             if ($next) {
                 return redirect()
-                    ->route('subject-teacher.results.students.show', [$offering, $next])
+                    ->route('subject-teacher.results.students.show', [$offering, $next->id])
                     ->with('success', 'Score saved.');
             }
         }
@@ -610,7 +610,7 @@ class SubjectTeacherResultController extends Controller
 
         if ($unknownHeadings !== []) {
             fclose($handle);
-            return back()->with('error', 'This file was made for an older version of the assessment scheme ("'.implode('", "', $unknownHeadings).'"). Download a fresh template and try again.');
+            return back()->with('error', 'These columns don\'t match the current assessment scheme ("'.implode('", "', $unknownHeadings).'"). Download a fresh template and try again.');
         }
 
         if ($columnMap === []) {

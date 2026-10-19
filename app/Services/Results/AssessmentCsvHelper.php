@@ -9,45 +9,61 @@ use Illuminate\Support\Collection;
 /**
  * Shared CSV pieces for the lecturer and subject-teacher score imports.
  *
- * Each score column is tagged with its component id, e.g.
- * "CA 1 (max 10) [c12]". Matching by id (not by name) means a renamed or
- * duplicated component name can't send a score to the wrong column, and a
- * file made for an older version of the scheme is detected and rejected
- * instead of being applied to the wrong components.
+ * Each score column is headed with the component's name and max, e.g.
+ * "Test (max 20)". Matching by that heading (names are unique within a
+ * scheme) keeps the file readable for a teacher, and a heading that ends in
+ * "(max N)" but matches nothing in the current scheme means the file was made
+ * for an older version of the scheme, so it is rejected instead of applied.
  */
 class AssessmentCsvHelper
 {
     public function headerFor(AssessmentComponent $component): string
     {
-        return "{$component->name} (max {$component->max_score}) [c{$component->id}]";
+        return trim($component->name)." (max {$component->max_score})";
     }
 
     /**
-     * Map CSV column index => scheme component, using the [c<id>] tag in the
-     * heading. Headings tagged with an id the scheme no longer has are
-     * returned separately so the caller can reject a stale file.
+     * Map CSV column index => scheme component by heading. Headings that end
+     * in "(max N)" but don't match exactly one current component are returned
+     * separately so the caller can reject a stale file. Columns without that
+     * ending (matric/admission number, student_name, anything extra) are
+     * ignored.
      *
-     * @return array{0: array<int, AssessmentComponent>, 1: array<int, string>} [map, unknownHeadings]
+     * @return array{0: array<int, AssessmentComponent>, 1: array<int, string>} [map, unmatchedScoreHeadings]
      */
     public function mapComponentColumns(array $header, Collection $components): array
     {
-        $byId = $components->keyBy('id');
+        $byHeading = [];
+
+        foreach ($components as $component) {
+            $byHeading[$this->normalize($this->headerFor($component))][] = $component;
+        }
+
         $map = [];
-        $unknown = [];
+        $unmatched = [];
 
         foreach ($header as $index => $label) {
-            if (preg_match('/\[c(\d+)\]\s*$/i', (string) $label, $m)) {
-                $component = $byId->get((int) $m[1]);
+            $label = trim((string) $label);
 
-                if ($component) {
-                    $map[$index] = $component;
-                } else {
-                    $unknown[] = trim((string) $label);
-                }
+            if (! preg_match('/\(max\s+[\d.]+\)\s*$/i', $label)) {
+                continue;
+            }
+
+            $matches = $byHeading[$this->normalize($label)] ?? [];
+
+            if (count($matches) === 1) {
+                $map[$index] = $matches[0];
+            } else {
+                $unmatched[] = $label;
             }
         }
 
-        return [$map, $unknown];
+        return [$map, $unmatched];
+    }
+
+    private function normalize(string $heading): string
+    {
+        return strtolower(preg_replace('/\s+/', ' ', trim($heading)));
     }
 
     /**

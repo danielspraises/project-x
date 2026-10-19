@@ -7,6 +7,7 @@ use App\Models\ResultAuditLog;
 use App\Models\ResultSubmission;
 use App\Models\ResultVerification;
 use App\Services\Results\ResultEntryContext;
+use App\Services\Results\ResultReviewService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
@@ -16,6 +17,7 @@ class ClassTeacherController extends Controller
 {
     public function __construct(
         private readonly ResultEntryContext $context,
+        private readonly ResultReviewService $review,
     ) {
     }
 
@@ -46,6 +48,36 @@ class ClassTeacherController extends Controller
             ->values();
 
         return view('class-teacher.results.index', compact('submissions'));
+    }
+
+    /**
+     * Read-only preview of one submission's scores before approving or
+     * returning it.
+     */
+    public function show(ResultSubmission $submission): View
+    {
+        $user = Auth::user();
+
+        if ($submission->institution_id !== $user->institution_id) {
+            abort(403, 'This submission does not belong to your institution.');
+        }
+
+        $submission->loadMissing('subjectOffering.subject', 'subjectOffering.schoolClass', 'subjectOffering.arm', 'submittedBy', 'verifications.reviewer');
+
+        if (! $submission->subjectOffering || ! $this->context->isClassTeacherFor($user, $submission->subjectOffering)) {
+            abort(403, 'You can only review submissions from your own class.');
+        }
+
+        $offering = $submission->subjectOffering;
+
+        return view('results.review', array_merge($this->review->build($submission), [
+            'submission' => $submission,
+            'title' => $offering->subject?->name ?? 'Result set #'.$submission->id,
+            'subtitle' => trim(($offering->schoolClass?->name ?? '').($offering->arm ? ' '.$offering->arm->name : '')),
+            'verifyUrl' => route('class-teacher.results.verify', $submission),
+            'backUrl' => route('class-teacher.results.index'),
+            'reviewerLabel' => 'Class Teacher',
+        ]));
     }
 
     /**

@@ -47,7 +47,11 @@
                             <div class="w-full lg:w-[420px]">
                                 <textarea x-model="item.notes" rows="2" placeholder="Optional note (required if returning)"
                                     class="w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm outline-none focus:border-cyan-400/50"></textarea>
-                                <div class="mt-2 flex justify-end gap-2">
+                                <div class="mt-2 flex flex-wrap items-center justify-end gap-2">
+                                    <a :href="'/class-teacher/results/' + item.id"
+                                        class="mr-auto rounded-lg border border-cyan-400/30 bg-cyan-400/10 px-3 py-2 text-xs font-black text-cyan-300 hover:bg-cyan-400/20">
+                                        Review scores
+                                    </a>
                                     <button type="button" @click="decide(item, 'returned')" :disabled="item.busy"
                                         class="rounded-lg border border-rose-400/30 bg-rose-400/10 px-3 py-2 text-xs font-black text-rose-300 disabled:opacity-40">
                                         Return

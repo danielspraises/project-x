@@ -14,7 +14,21 @@
 
         <div class="cx-panel mb-6 overflow-hidden rounded-[2rem] border border-white/10 bg-white/[0.06] p-6 shadow-2xl backdrop-blur-2xl">
             <h1 class="text-2xl font-black tracking-tight">Bulk Upload — {{ $offering->subject->name }}</h1>
-            <p class="mt-2 text-sm text-slate-400">The template has one column for each part of the assessment scheme. Fill in whichever columns you have — CA only, exam only, or all of them. A <b class="text-slate-200">blank cell leaves that score as it is</b>, so uploading CA scores will never erase exam scores already entered. Type <b class="text-slate-200">A</b> for a student who was absent (counts as 0). Students are matched by admission number. Don't rename or reorder the column headings — if the scheme changes, download a fresh template.</p>
+            <p class="mt-2 text-sm text-slate-400">The template has one column for each part of the assessment scheme. Fill in whichever columns you have — CA only, exam only, or all of them. A <b class="text-slate-200">blank cell leaves that score as it is</b>, so uploading CA scores will never erase exam scores already entered. Type <b class="text-slate-200">A</b> for a student who was absent (counts as 0). Students are matched by admission number. Keep the column headings exactly as downloaded (their order doesn't matter). If you change the assessment scheme, download a fresh template.</p>
+        </div>
+
+        <div class="cx-panel mb-6 rounded-[1.5rem] border border-white/10 bg-slate-900/75 p-5">
+            <h2 class="font-black">What's in the template</h2>
+            <ul class="mt-3 space-y-2 text-sm text-slate-300">
+                <li><span class="font-mono text-cyan-300">admission_number</span> <span class="text-slate-500">— identifies the student. Don't edit it.</span></li>
+                <li><span class="font-mono text-cyan-300">student_name</span> <span class="text-slate-500">— for your reference only; ignored on upload.</span></li>
+                @foreach ($scheme->components as $component)
+                    <li>
+                        <span class="font-mono text-cyan-300">{{ $component->name }} (max {{ $component->max_score }})</span>
+                        <span class="text-slate-500">— a score from 0 to {{ $component->max_score }}, or <b class="text-slate-300">A</b> if absent. Blank keeps the current score.</span>
+                    </li>
+                @endforeach
+            </ul>
         </div>
 
         @if (session('error'))
