@@ -197,8 +197,11 @@ Route::middleware(['auth', 'permission:results.approve'])
 
         Route::post('/{submission}/verify', [HodController::class, 'verify'])
             ->name('verify');
+
+        Route::get('/{submission}', [HodController::class, 'show'])->name('show');
     });
 
+    
 
 // Lecturer and Teachers routes
 
@@ -278,7 +281,7 @@ Route::middleware(['auth', 'permission:results.enter'])
         Route::post('/{offering}/scheme', [SubjectTeacherResultController::class, 'schemeUpdate'])->name('scheme.update');
     });
 
-// Subject teacher routes
+// Class teacher routes
 Route::middleware(['auth', 'permission:results.approve'])
     ->prefix('class-teacher/results')
     ->name('class-teacher.results.')
@@ -286,6 +289,7 @@ Route::middleware(['auth', 'permission:results.approve'])
         Route::get('/', [ClassTeacherController::class, 'index'])->name('index');
         Route::post('/{submission}/verify', [ClassTeacherController::class, 'verify'])->name('verify');
 
+        Route::get('/{submission}', [ClassTeacherController::class, 'show'])->name('show');
 
     });
 
